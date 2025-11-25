@@ -1,0 +1,28 @@
+# Render Deployment Configuration for PolyMesh AI Agent
+
+services:
+  # AI Agent Service
+  - type: web
+    name: polymesh-agent
+    env: node
+    region: oregon
+    plan: starter
+    buildCommand: cd agents/eliza && npm install
+    startCommand: cd agents/eliza && node --loader ts-node/esm src/index.ts
+    envVars:
+      - key: POLYMESH_RPC_URL
+        value: https://rpc-amoy.polygon.technology
+      - key: CHAIN_ID
+        value: 80002
+      - key: AGENT_EXECUTOR_ADDRESS
+        value: 0xe77B6844A0b6b534EC60914bDc58dAB74bF9c1E1
+      - key: BRIDGE_EXTENSION_ADDRESS
+        value: 0xDeaf2F0B99BBbe9003055529A2bf7a73C33d127B
+      - key: WS_PORT
+        value: 8080
+      - key: AGENT_PRIVATE_KEY
+        sync: false  # Add this as a secret in Render dashboard
+      - key: NODE_ENV
+        value: production
+    healthCheckPath: /health
+    autoDeploy: true

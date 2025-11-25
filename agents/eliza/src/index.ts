@@ -109,8 +109,21 @@ class PolyMeshAgent {
       }));
     });
 
+    // Add health check endpoint for Render
+    server.on('request', (req, res) => {
+      if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          status: 'ok', 
+          timestamp: Date.now(),
+          trades: this.stats.totalTrades 
+        }));
+      }
+    });
+
     server.listen(config.wsPort, () => {
-      console.log(`🔌 WebSocket server running on port ${config.wsPort}\n`);
+      console.log(`🔌 WebSocket server running on port ${config.wsPort}`);
+      console.log(`🏥 Health check available at http://localhost:${config.wsPort}/health\n`);
     });
   }
 
