@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Kurtosis
+.kurtosis/
+kurtosis-*.log
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# Build outputs
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Hardhat
+cache/
+artifacts/
+typechain-types/
+coverage/
+coverage.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.nyc_output
+
+# Temp files
+tmp/
+temp/
+*.tmp
+
+# Secrets
+secrets/
+*.secret
+private-keys/
+
+# Deployment artifacts (contain contract addresses but OK to commit)
+# deployment-*.json files are useful for reference

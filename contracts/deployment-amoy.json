@@ -1,0 +1,12 @@
+{
+  "network": "amoy",
+  "chainId": 80002,
+  "deployer": "0xF011D5e43BBE01cCc7ab1f1E799e974691FD530b",
+  "timestamp": "2025-11-22T18:53:09.631Z",
+  "contracts": {
+    "MockBridge": "0x3b0D560ae0e5cE2C878113bD9d1fF770DBDA1Ae9",
+    "AggLayerBridge": null,
+    "AgentExecutor": "0xe77B6844A0b6b534EC60914bDc58dAB74bF9c1E1",
+    "BridgeExtension": "0xDeaf2F0B99BBbe9003055529A2bf7a73C33d127B"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "name": "neuromesh",
+  "version": "0.1.0",
+  "description": "Autonomous AI Agent Infrastructure on Polygon CDK",
+  "private": true,
+  "workspaces": [
+    "contracts",
+    "agents/eliza",
+    "frontend/neuromesh-ui"
+  ],
+  "scripts": {
+    "setup": "npm install && npm run setup:chain && npm run setup:contracts && npm run setup:agents && npm run setup:frontend",
+    "setup:chain": "cd chain && npm install",
+    "setup:contracts": "cd contracts && npm install",
+    "setup:agents": "cd agents/eliza && npm install",
+    "setup:frontend": "cd frontend/neuromesh-ui && npm install",
+    "chain:start": "cd chain && kurtosis run github.com/0xPolygon/kurtosis-cdk --args-file params.yml",
+    "chain:stop": "kurtosis enclave stop cdk",
+    "chain:clean": "kurtosis clean -a",
+    "contracts:compile": "cd contracts && npx hardhat compile",
+    "contracts:deploy": "cd contracts && npx hardhat run scripts/deploy.js",
+    "contracts:test": "cd contracts && npx hardhat test",
+    "agent:start": "cd agents/eliza && npm run start",
+    "frontend:dev": "cd frontend/neuromesh-ui && npm run dev",
+    "frontend:build": "cd frontend/neuromesh-ui && npm run build",
+    "dev": "concurrently \"npm run agent:start\" \"npm run frontend:dev\"",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx",
+    "format": "prettier --write \"**/*.{js,jsx,ts,tsx,json,md}\""
+  },
+  "keywords": [
+    "polygon",
+    "cdk",
+    "agglayer",
+    "ai-agents",
+    "zkml",
+    "blockchain",
+    "web3"
+  ],
+  "author": "NeuroMesh Team",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "eslint": "^8.57.0",
+    "prettier": "^3.1.1"
+  }
+}
