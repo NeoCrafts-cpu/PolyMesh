@@ -23,7 +23,7 @@ const config = {
   wsUrl: process.env.POLYMESH_WS_URL || 'ws://127.0.0.1:8546',
   privateKey: process.env.AGENT_PRIVATE_KEY || '',
   agentExecutorAddress: process.env.AGENT_EXECUTOR_ADDRESS || '',
-  priceCheckInterval: parseInt(process.env.PRICE_CHECK_INTERVAL || '30000'),
+  priceCheckInterval: parseInt(process.env.PRICE_CHECK_INTERVAL || '60000'), // 60 seconds to avoid rate limits
   priceThreshold: parseFloat(process.env.PRICE_THRESHOLD_PERCENT || '2.0'),
   minProfitPercent: parseFloat(process.env.MIN_PROFIT_PERCENT || '0.5'),
   maxGasPrice: process.env.MAX_GAS_PRICE || '50000000000',
@@ -237,7 +237,7 @@ class PolyMeshAgent {
       return prices;
     }
 
-    // Production: Fetch from APIs
+    // Production: Fetch from APIs with rate limit handling
     try {
       const response = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
         params: {
@@ -246,8 +246,14 @@ class PolyMeshAgent {
         },
       });
       return response.data;
-    } catch (error) {
-      console.error('Failed to fetch prices:', error);
+    } catch (error: any) {
+      // Handle rate limiting gracefully
+      if (error?.response?.status === 429) {
+        const retryAfter = error.response.headers['retry-after'] || 60;
+        console.log(`⏸️  CoinGecko rate limit reached. Retrying in ${retryAfter}s...`);
+        return null; // Return null to skip this iteration
+      }
+      console.error('Failed to fetch prices:', error.message);
       return null;
     }
   }
