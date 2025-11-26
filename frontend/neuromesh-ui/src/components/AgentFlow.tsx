@@ -7,7 +7,7 @@ interface AgentFlowProps {
   setAgentStatus: (status: 'idle' | 'thinking' | 'executing') => void;
 }
 
-export default function AgentFlow({ agentStatus, setAgentStatus }: AgentFlowProps) {
+export default function AgentFlow({ setAgentStatus }: AgentFlowProps) {
   const [currentStep, setCurrentStep] = useState(0);
 
   useEffect(() => {

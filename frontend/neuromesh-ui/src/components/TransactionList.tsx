@@ -69,7 +69,7 @@ export default function TransactionList() {
           Waiting for transactions...
         </div>
       ) : (
-        transactions.map((tx, index) => (
+        transactions.map((tx) => (
           <motion.div
             key={tx.id}
             initial={{ opacity: 0, y: -20 }}

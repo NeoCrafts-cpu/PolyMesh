@@ -46,13 +46,11 @@ function App() {
     averageProfit: 0,
     tradeHistory: [],
   });
-  const [lastTrade, setLastTrade] = useState<any>(null);
-  const [notifications, setNotifications] = useState<any[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     // Connect to WebSocket server (use env variable for production)
-    const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8080';
+    const wsUrl = (import.meta as any).env.VITE_WS_URL || 'ws://localhost:8080';
     console.log('Connecting to WebSocket...', wsUrl);
     const ws = new WebSocket(wsUrl);
     
@@ -72,40 +70,22 @@ function App() {
         
         case 'opportunity':
           setAgentStatus('thinking');
-          addNotification({
-            type: 'opportunity',
-            message: `🎯 Opportunity: ${message.data.token} ${message.data.profitPercent.toFixed(2)}% profit`,
-            data: message.data,
-          });
+          console.log('Opportunity detected:', message.data);
           break;
         
         case 'trade_pending':
           setAgentStatus('executing');
-          setLastTrade(message.data);
-          addNotification({
-            type: 'pending',
-            message: `⏳ Executing trade: ${message.data.token}`,
-            data: message.data,
-          });
+          console.log('Trade pending:', message.data);
           break;
         
         case 'trade_success':
           setAgentStatus('idle');
-          setLastTrade(message.data);
-          addNotification({
-            type: 'success',
-            message: `✅ Trade successful! ${message.data.token} +${message.data.profitPercent.toFixed(2)}%`,
-            data: message.data,
-          });
+          console.log('Trade success:', message.data);
           break;
         
         case 'trade_failed':
           setAgentStatus('idle');
-          addNotification({
-            type: 'error',
-            message: `❌ Trade failed: ${message.data.token}`,
-            data: message.data,
-          });
+          console.log('Trade failed:', message.data);
           break;
       }
     };
@@ -126,10 +106,6 @@ function App() {
       ws.close();
     };
   }, []);
-
-  const addNotification = (notification: any) => {
-    setNotifications(prev => [{ ...notification, id: Date.now() }, ...prev].slice(0, 10));
-  };
 
   const winRate = stats.totalTrades > 0 
     ? ((stats.successfulTrades / stats.totalTrades) * 100).toFixed(1)
