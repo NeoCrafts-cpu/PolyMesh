@@ -4,7 +4,7 @@ services:
   # AI Agent Service
   - type: web
     name: polymesh-agent
-    env: node
+    runtime: node
     region: oregon
     plan: starter
     buildCommand: cd agents/eliza && npm install
