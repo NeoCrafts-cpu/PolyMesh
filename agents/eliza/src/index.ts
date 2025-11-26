@@ -121,9 +121,9 @@ class PolyMeshAgent {
       }
     });
 
-    server.listen(config.wsPort, () => {
+    server.listen(config.wsPort, '0.0.0.0', () => {
       console.log(`🔌 WebSocket server running on port ${config.wsPort}`);
-      console.log(`🏥 Health check available at http://localhost:${config.wsPort}/health\n`);
+      console.log(`🏥 Health check available at http://0.0.0.0:${config.wsPort}/health\n`);
     });
   }
 
