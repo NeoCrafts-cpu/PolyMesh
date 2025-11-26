@@ -1,14 +1,15 @@
 # Render Deployment Configuration for PolyMesh AI Agent
 
 services:
-  # AI Agent Service
+  # AI Agent Service (Web Service with WebSocket)
   - type: web
     name: polymesh-agent
     runtime: node
     region: oregon
     plan: starter
-    buildCommand: cd agents/eliza && npm install
-    startCommand: cd agents/eliza && node --loader ts-node/esm src/index.ts
+    repo: https://github.com/NeoCrafts-cpu/PolyMesh
+    buildCommand: cd agents/eliza && npm install && npm run build
+    startCommand: cd agents/eliza && node dist/index.js
     envVars:
       - key: POLYMESH_RPC_URL
         value: https://rpc-amoy.polygon.technology
