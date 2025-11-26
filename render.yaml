@@ -8,8 +8,8 @@ services:
     region: oregon
     plan: starter
     repo: https://github.com/NeoCrafts-cpu/PolyMesh
-    buildCommand: cd agents/eliza && npm install && npm run build && ls -la dist
-    startCommand: cd agents/eliza && node dist/index.js
+    buildCommand: cd agents/eliza && npm install && npm run build
+    startCommand: cd agents/eliza && ls -la && ls -la dist && node dist/index.js
     envVars:
       - key: POLYMESH_RPC_URL
         value: https://rpc-amoy.polygon.technology
