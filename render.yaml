@@ -8,7 +8,7 @@ services:
     region: oregon
     plan: starter
     repo: https://github.com/NeoCrafts-cpu/PolyMesh
-    buildCommand: cd agents/eliza && npm install && npm run build
+    buildCommand: cd agents/eliza && npm install --legacy-peer-deps && npm run build
     startCommand: cd agents/eliza && ls -la && ls -la dist && node dist/index.js
     envVars:
       - key: POLYMESH_RPC_URL
