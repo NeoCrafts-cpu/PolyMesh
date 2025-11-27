@@ -78,7 +78,11 @@ class PolyMeshAgent {
     tradeHistory: [],
   };
 
-  constructor() {
+  private httpServer: http.Server;
+
+  constructor(httpServer: http.Server) {
+    this.httpServer = httpServer;
+    
     // Initialize blockchain connection
     console.log('🧠 Initializing PolyMesh Agent...');
     
@@ -94,10 +98,9 @@ class PolyMeshAgent {
     console.log(`✅ Agent initialized: ${this.wallet.address}\n`);
   }
 
-  // Initialize WebSocket server for real-time updates
+  // Initialize WebSocket server for real-time updates (uses existing HTTP server)
   private initWebSocket() {
-    const server = http.createServer();
-    this.wss = new WebSocketServer({ server });
+    this.wss = new WebSocketServer({ server: this.httpServer });
 
     this.wss.on('connection', (ws) => {
       console.log('📡 Dashboard connected via WebSocket');
@@ -109,22 +112,7 @@ class PolyMeshAgent {
       }));
     });
 
-    // Add health check endpoint for Render
-    server.on('request', (req, res) => {
-      if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ 
-          status: 'ok', 
-          timestamp: Date.now(),
-          trades: this.stats.totalTrades 
-        }));
-      }
-    });
-
-    server.listen(config.wsPort, '0.0.0.0', () => {
-      console.log(`🔌 WebSocket server running on port ${config.wsPort}`);
-      console.log(`🏥 Health check available at http://0.0.0.0:${config.wsPort}/health\n`);
-    });
+    console.log(`🔌 WebSocket server attached to HTTP server\n`);
   }
 
   // Broadcast update to all connected clients
@@ -435,9 +423,31 @@ class PolyMeshAgent {
   }
 }
 
+// Start HTTP server immediately for Render health checks
+// This must happen BEFORE any async operations
+const httpServer = http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ 
+      status: 'ok', 
+      service: 'polymesh-agent',
+      timestamp: Date.now(),
+      version: '0.1.0'
+    }));
+  } else {
+    res.writeHead(404);
+    res.end('Not Found');
+  }
+});
+
+httpServer.listen(config.wsPort, '0.0.0.0', () => {
+  console.log(`🏥 HTTP server started on port ${config.wsPort}`);
+  console.log(`🏥 Health check available at http://0.0.0.0:${config.wsPort}/health`);
+});
+
 // Main execution
 async function main() {
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log('       🧠 PolyMesh AI Agent v0.1.0       ');
   console.log('   Autonomous Cross-Chain Trading Agent    ');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
@@ -453,7 +463,7 @@ async function main() {
     process.exit(1);
   }
 
-  const agent = new PolyMeshAgent();
+  const agent = new PolyMeshAgent(httpServer);
 
   // Graceful shutdown
   process.on('SIGINT', async () => {
