@@ -749,7 +749,6 @@ class PolyMeshAgent {
 
     return null;
   }
-  }
 
   private async executeTrade(opportunity: ArbitrageOpportunity) {
     console.log(`⚡ Executing ${opportunity.type} trade via AggLayer...`);
