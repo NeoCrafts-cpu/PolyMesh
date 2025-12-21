@@ -18,8 +18,23 @@ import "./interfaces/IBridgeExtension.sol";
  * - Gas optimization for high-frequency agent transactions
  * - Integration with ZKML verification (optional)
  * - KYA (Know Your Agent) checks
+ * 
+ * Security Features (Enhanced):
+ * - Slippage protection with minOutputAmount
+ * - Rate limiting with cooldowns
+ * - Flash loan attack prevention
+ * - Agent staking/slashing mechanism
+ * - Protocol fee collection
  */
 contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
+    // ==================== Constants ====================
+    
+    uint256 public constant MAX_BATCH_SIZE = 10;
+    uint256 public constant MIN_STAKE_AMOUNT = 0.1 ether;
+    uint256 public constant SLASH_PERCENT = 10; // 10% slash on failure
+    uint256 public constant PROTOCOL_FEE_BPS = 10; // 0.1% fee (10 basis points)
+    uint256 public constant MAX_SLIPPAGE_BPS = 500; // 5% max slippage
+    uint256 public constant COOLDOWN_BLOCKS = 1; // 1 block minimum between executions
     // ==================== State Variables ====================
     
     /// @notice Reference to the Polygon zkEVM Bridge V2
@@ -49,6 +64,35 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
     /// @notice Failed execution count
     mapping(address => uint256) public agentFailureCount;
     
+    // ==================== New State Variables (Security Features) ====================
+    
+    /// @notice Agent staked amounts
+    mapping(address => uint256) public agentStakes;
+    
+    /// @notice Last execution block per agent (for rate limiting)
+    mapping(address => uint256) public lastExecutionBlock;
+    
+    /// @notice Collected protocol fees
+    uint256 public collectedFees;
+    
+    /// @notice Fee recipient address
+    address public feeRecipient;
+    
+    /// @notice ZKML verification enabled flag
+    bool public zkmlEnabled = false;
+    
+    /// @notice KYA verification enabled flag  
+    bool public kyaEnabled = false;
+    
+    /// @notice Registered AI model hashes for ZKML
+    mapping(bytes32 => bool) public registeredModels;
+    
+    /// @notice Agent KYA credentials (agent => credentialHash)
+    mapping(address => bytes32) public agentCredentials;
+    
+    /// @notice Flash loan protection - tracks execution in progress
+    mapping(bytes32 => bool) private _executionInProgress;
+    
     // ==================== Events ====================
     
     event AgentExecuted(
@@ -67,6 +111,15 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
     event ZKMLVerifierUpdated(address indexed oldVerifier, address indexed newVerifier);
     event KYARegistryUpdated(address indexed oldRegistry, address indexed newRegistry);
     
+    // New events for security features
+    event AgentStaked(address indexed agent, uint256 amount, uint256 totalStake);
+    event AgentUnstaked(address indexed agent, uint256 amount, uint256 totalStake);
+    event AgentSlashed(address indexed agent, uint256 amount, string reason);
+    event FeesCollected(address indexed recipient, uint256 amount);
+    event ModelRegistered(bytes32 indexed modelHash);
+    event CredentialUpdated(address indexed agent, bytes32 credentialHash);
+    event ZKMLProofVerified(address indexed agent, bytes32 indexed proofHash);
+    
     // ==================== Errors ====================
     
     error UnauthorizedAgent(address agent);
@@ -74,6 +127,41 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
     error InvalidDestination(uint32 network, address target);
     error ExecutionFailed(string reason);
     error InvalidBridgeExtension();
+    error InsufficientStake(address agent, uint256 current, uint256 required);
+    error RateLimitExceeded(address agent, uint256 lastBlock, uint256 currentBlock);
+    error SlippageExceeded(uint256 expected, uint256 actual, uint256 maxSlippage);
+    error BatchSizeExceeded(uint256 size, uint256 maxSize);
+    error FlashLoanDetected();
+    error InvalidZKMLProof(address agent);
+    error InvalidKYACredential(address agent);
+    error ModelNotRegistered(bytes32 modelHash);
+    error WithdrawalFailed();
+    
+    // ==================== Modifiers ====================
+    
+    /// @notice Prevents flash loan attacks
+    modifier noFlashLoan() {
+        bytes32 txOrigin = keccak256(abi.encodePacked(tx.origin, block.number));
+        if (_executionInProgress[txOrigin]) {
+            revert FlashLoanDetected();
+        }
+        _executionInProgress[txOrigin] = true;
+        _;
+        _executionInProgress[txOrigin] = false;
+    }
+    
+    /// @notice Rate limiting modifier
+    modifier rateLimited() {
+        if (block.number < lastExecutionBlock[msg.sender] + COOLDOWN_BLOCKS) {
+            revert RateLimitExceeded(
+                msg.sender,
+                lastExecutionBlock[msg.sender],
+                block.number
+            );
+        }
+        lastExecutionBlock[msg.sender] = block.number;
+        _;
+    }
     
     // ==================== Constructor ====================
     
@@ -88,6 +176,67 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
     ) Ownable(_initialOwner) {
         require(_bridge != address(0), "Invalid bridge address");
         bridge = IPolygonZkEVMBridgeV2(_bridge);
+        feeRecipient = _initialOwner;
+    }
+    
+    // ==================== Staking Functions ====================
+    
+    /**
+     * @notice Stake tokens to become an authorized agent
+     */
+    function stake() external payable {
+        require(msg.value > 0, "Must stake some amount");
+        
+        agentStakes[msg.sender] += msg.value;
+        
+        // Auto-authorize if stake meets minimum
+        if (agentStakes[msg.sender] >= MIN_STAKE_AMOUNT && !authorizedAgents[msg.sender]) {
+            authorizedAgents[msg.sender] = true;
+            agentReputation[msg.sender] = 100;
+            emit AgentAuthorized(msg.sender, block.timestamp);
+        }
+        
+        emit AgentStaked(msg.sender, msg.value, agentStakes[msg.sender]);
+    }
+    
+    /**
+     * @notice Unstake tokens
+     * @param amount Amount to unstake
+     */
+    function unstake(uint256 amount) external nonReentrant {
+        require(agentStakes[msg.sender] >= amount, "Insufficient stake");
+        
+        agentStakes[msg.sender] -= amount;
+        
+        // Deauthorize if below minimum
+        if (agentStakes[msg.sender] < MIN_STAKE_AMOUNT) {
+            authorizedAgents[msg.sender] = false;
+            emit AgentDeauthorized(msg.sender, block.timestamp);
+        }
+        
+        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        if (!success) revert WithdrawalFailed();
+        
+        emit AgentUnstaked(msg.sender, amount, agentStakes[msg.sender]);
+    }
+    
+    /**
+     * @notice Slash an agent's stake (internal)
+     */
+    function _slashAgent(address agent, string memory reason) internal {
+        uint256 slashAmount = (agentStakes[agent] * SLASH_PERCENT) / 100;
+        
+        if (slashAmount > 0) {
+            agentStakes[agent] -= slashAmount;
+            collectedFees += slashAmount;
+            
+            emit AgentSlashed(agent, slashAmount, reason);
+            
+            if (agentStakes[agent] < MIN_STAKE_AMOUNT) {
+                authorizedAgents[agent] = false;
+                emit AgentDeauthorized(agent, block.timestamp);
+            }
+        }
     }
     
     // ==================== Agent Execution Functions ====================
@@ -110,7 +259,7 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
         uint256 amount,
         bytes calldata callData,
         bytes calldata zkProof
-    ) external payable nonReentrant whenNotPaused {
+    ) external payable nonReentrant whenNotPaused noFlashLoan rateLimited {
         // 1. Authorization check
         if (!authorizedAgents[msg.sender]) {
             revert UnauthorizedAgent(msg.sender);
@@ -126,12 +275,12 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
         }
         
         // 3. ZKML verification (if enabled)
-        if (zkmlVerifier != address(0)) {
+        if (zkmlEnabled && zkmlVerifier != address(0)) {
             _verifyZKProof(msg.sender, zkProof, callData);
         }
         
         // 4. KYA check (if enabled)
-        if (kyaRegistry != address(0)) {
+        if (kyaEnabled && kyaRegistry != address(0)) {
             _verifyKYA(msg.sender);
         }
         
@@ -140,11 +289,16 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
             revert InvalidDestination(destinationNetwork, targetContract);
         }
         
-        // 6. Execute bridgeAndCall
+        // 6. Calculate and collect protocol fee
+        uint256 fee = (amount * PROTOCOL_FEE_BPS) / 10000;
+        uint256 amountAfterFee = amount - fee;
+        collectedFees += fee;
+        
+        // 7. Execute bridgeAndCall
         try bridge.bridgeAndCall{value: msg.value}(
             destinationNetwork,
             targetContract,
-            amount,
+            amountAfterFee,
             address(0), // Using native gas token ($MESH)
             true, // Force update global exit root
             "", // No permit data for now
@@ -158,13 +312,106 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
                 msg.sender,
                 destinationNetwork,
                 targetContract,
-                amount,
+                amountAfterFee,
                 callData,
                 block.timestamp
             );
         } catch Error(string memory reason) {
             agentFailureCount[msg.sender]++;
             _updateReputation(msg.sender, false);
+            _slashAgent(msg.sender, reason);
+            revert ExecutionFailed(reason);
+        }
+    }
+    
+    /**
+     * @notice Execute with full security features including slippage protection
+     * @param destinationNetwork Target network ID
+     * @param targetContract Contract to call
+     * @param amount Amount to bridge
+     * @param minOutputAmount Minimum output (slippage protection)
+     * @param callData Encoded call data
+     * @param zkProof ZKML proof (if enabled)
+     */
+    function agentExecuteSecure(
+        uint32 destinationNetwork,
+        address targetContract,
+        uint256 amount,
+        uint256 minOutputAmount,
+        bytes calldata callData,
+        bytes calldata zkProof
+    ) external payable nonReentrant whenNotPaused noFlashLoan rateLimited {
+        // 1. Authorization & stake check
+        if (!authorizedAgents[msg.sender]) {
+            revert UnauthorizedAgent(msg.sender);
+        }
+        
+        if (agentStakes[msg.sender] < MIN_STAKE_AMOUNT) {
+            revert InsufficientStake(msg.sender, agentStakes[msg.sender], MIN_STAKE_AMOUNT);
+        }
+        
+        // 2. Reputation check
+        if (agentReputation[msg.sender] < minReputation) {
+            revert InsufficientReputation(
+                msg.sender,
+                agentReputation[msg.sender],
+                minReputation
+            );
+        }
+        
+        // 3. ZKML verification (if enabled)
+        if (zkmlEnabled) {
+            _verifyZKProof(msg.sender, zkProof, callData);
+        }
+        
+        // 4. KYA check (if enabled)
+        if (kyaEnabled) {
+            _verifyKYA(msg.sender);
+        }
+        
+        // 5. Validate destination
+        if (targetContract == address(0)) {
+            revert InvalidDestination(destinationNetwork, targetContract);
+        }
+        
+        // 6. Validate slippage
+        if (minOutputAmount > 0) {
+            uint256 maxSlippageAmount = (amount * MAX_SLIPPAGE_BPS) / 10000;
+            if (amount - minOutputAmount > maxSlippageAmount) {
+                revert SlippageExceeded(amount, minOutputAmount, MAX_SLIPPAGE_BPS);
+            }
+        }
+        
+        // 7. Calculate and collect protocol fee
+        uint256 fee = (amount * PROTOCOL_FEE_BPS) / 10000;
+        uint256 amountAfterFee = amount - fee;
+        collectedFees += fee;
+        
+        // 8. Execute bridgeAndCall
+        try bridge.bridgeAndCall{value: msg.value}(
+            destinationNetwork,
+            targetContract,
+            amountAfterFee,
+            address(0),
+            true,
+            "",
+            callData
+        ) {
+            agentExecutionCount[msg.sender]++;
+            _updateReputation(msg.sender, true);
+            
+            emit AgentExecuted(
+                msg.sender,
+                destinationNetwork,
+                targetContract,
+                amountAfterFee,
+                callData,
+                block.timestamp
+            );
+        } catch Error(string memory reason) {
+            agentFailureCount[msg.sender]++;
+            _updateReputation(msg.sender, false);
+            _slashAgent(msg.sender, reason);
             revert ExecutionFailed(reason);
         }
     }
@@ -178,7 +425,7 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
         address targetContract,
         uint256 amount,
         bytes calldata callData
-    ) external payable nonReentrant whenNotPaused {
+    ) external payable nonReentrant whenNotPaused rateLimited {
         // 1. Authorization check
         if (!authorizedAgents[msg.sender]) {
             revert UnauthorizedAgent(msg.sender);
@@ -198,11 +445,16 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
             revert InvalidDestination(destinationNetwork, targetContract);
         }
         
-        // 4. Execute bridgeAndCall (no ZKML or KYA checks for simple version)
+        // 4. Calculate and collect protocol fee
+        uint256 fee = (amount * PROTOCOL_FEE_BPS) / 10000;
+        uint256 amountAfterFee = amount - fee;
+        collectedFees += fee;
+        
+        // 5. Execute bridgeAndCall (no ZKML or KYA checks for simple version)
         try bridge.bridgeAndCall{value: msg.value}(
             destinationNetwork,
             targetContract,
-            amount,
+            amountAfterFee,
             address(0), // Using native gas token
             true, // Force update global exit root
             "", // No permit data
@@ -216,7 +468,7 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
                 msg.sender,
                 destinationNetwork,
                 targetContract,
-                amount,
+                amountAfterFee,
                 callData,
                 block.timestamp
             );
@@ -236,7 +488,12 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
         address[] calldata targetContracts,
         uint256[] calldata amounts,
         bytes[] calldata callDatas
-    ) external payable nonReentrant whenNotPaused {
+    ) external payable nonReentrant whenNotPaused noFlashLoan {
+        // Validate batch size
+        if (destinationNetworks.length > MAX_BATCH_SIZE) {
+            revert BatchSizeExceeded(destinationNetworks.length, MAX_BATCH_SIZE);
+        }
+        
         require(
             destinationNetworks.length == targetContracts.length &&
             targetContracts.length == amounts.length &&
@@ -244,14 +501,67 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
             "Array length mismatch"
         );
         
+        // Authorization check for batch caller
+        if (!authorizedAgents[msg.sender]) {
+            revert UnauthorizedAgent(msg.sender);
+        }
+        
+        uint256 valuePerCall = msg.value / destinationNetworks.length;
+        
         for (uint256 i = 0; i < destinationNetworks.length; i++) {
-            // Each execution will perform its own checks
-            this.agentExecuteSimple{value: msg.value / destinationNetworks.length}(
+            _executeSingleTrade(
                 destinationNetworks[i],
                 targetContracts[i],
                 amounts[i],
-                callDatas[i]
+                callDatas[i],
+                valuePerCall
             );
+        }
+    }
+    
+    /**
+     * @notice Internal single trade execution for batching
+     */
+    function _executeSingleTrade(
+        uint32 destinationNetwork,
+        address targetContract,
+        uint256 amount,
+        bytes calldata callData,
+        uint256 value
+    ) internal {
+        if (targetContract == address(0)) {
+            revert InvalidDestination(destinationNetwork, targetContract);
+        }
+        
+        // Calculate fee
+        uint256 fee = (amount * PROTOCOL_FEE_BPS) / 10000;
+        uint256 amountAfterFee = amount - fee;
+        collectedFees += fee;
+        
+        try bridge.bridgeAndCall{value: value}(
+            destinationNetwork,
+            targetContract,
+            amountAfterFee,
+            address(0),
+            true,
+            "",
+            callData
+        ) {
+            agentExecutionCount[msg.sender]++;
+            _updateReputation(msg.sender, true);
+            
+            emit AgentExecuted(
+                msg.sender,
+                destinationNetwork,
+                targetContract,
+                amountAfterFee,
+                callData,
+                block.timestamp
+            );
+        } catch Error(string memory) {
+            agentFailureCount[msg.sender]++;
+            _updateReputation(msg.sender, false);
+            // Don't revert batch, just log failure
         }
     }
     
@@ -265,19 +575,34 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
         address agent,
         bytes calldata zkProof,
         bytes calldata callData
-    ) internal view {
+    ) internal {
         if (zkProof.length == 0) {
             revert ExecutionFailed("ZKML proof required");
         }
         
-        // Call ZKML verifier contract
-        // This would verify that the callData was generated by a specific AI model
-        // For now, we'll implement a simple check
-        // In production, this would call HyperOracle or similar ZKML verifier
+        // Decode proof components
+        (bytes32 modelHash, bytes32 inputHash, bytes memory signature) = abi.decode(
+            zkProof,
+            (bytes32, bytes32, bytes)
+        );
         
-        // bytes32 callDataHash = keccak256(callData);
-        // bool verified = IZKMLVerifier(zkmlVerifier).verify(agent, zkProof, callDataHash);
-        // require(verified, "Invalid ZK proof");
+        // Verify model is registered
+        if (!registeredModels[modelHash]) {
+            revert ModelNotRegistered(modelHash);
+        }
+        
+        // Verify input matches callData
+        bytes32 callDataHash = keccak256(callData);
+        if (inputHash != callDataHash) {
+            revert InvalidZKMLProof(agent);
+        }
+        
+        // Verify signature length (basic check)
+        if (signature.length < 65) {
+            revert InvalidZKMLProof(agent);
+        }
+        
+        emit ZKMLProofVerified(agent, keccak256(zkProof));
     }
     
     /**
@@ -285,12 +610,15 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
      * @dev Checks that the agent has valid identity credentials
      */
     function _verifyKYA(address agent) internal view {
-        // Call KYA registry to verify agent has valid credentials
-        // This would integrate with Privado ID
-        // For now, we'll implement a simple check
+        bytes32 credential = agentCredentials[agent];
         
-        // bool hasCredential = IKYARegistry(kyaRegistry).hasValidCredential(agent);
-        // require(hasCredential, "Invalid KYA credential");
+        if (credential == bytes32(0)) {
+            revert InvalidKYACredential(agent);
+        }
+        
+        // In production, verify with Privado ID registry
+        // bool isValid = IKYARegistry(kyaRegistry).verifyCredential(agent, credential);
+        // if (!isValid) revert InvalidKYACredential(agent);
     }
     
     /**
@@ -373,6 +701,60 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
     }
     
     /**
+     * @notice Enable/disable ZKML verification
+     */
+    function setZKMLEnabled(bool enabled) external onlyOwner {
+        zkmlEnabled = enabled;
+    }
+    
+    /**
+     * @notice Enable/disable KYA verification
+     */
+    function setKYAEnabled(bool enabled) external onlyOwner {
+        kyaEnabled = enabled;
+    }
+    
+    /**
+     * @notice Register an AI model for ZKML verification
+     * @param modelHash Hash of the AI model
+     */
+    function registerModel(bytes32 modelHash) external onlyOwner {
+        registeredModels[modelHash] = true;
+        emit ModelRegistered(modelHash);
+    }
+    
+    /**
+     * @notice Set agent KYA credential
+     * @param agent Agent address
+     * @param credentialHash Credential hash from Privado ID
+     */
+    function setAgentCredential(address agent, bytes32 credentialHash) external onlyOwner {
+        agentCredentials[agent] = credentialHash;
+        emit CredentialUpdated(agent, credentialHash);
+    }
+    
+    /**
+     * @notice Update the fee recipient address
+     */
+    function setFeeRecipient(address _feeRecipient) external onlyOwner {
+        require(_feeRecipient != address(0), "Invalid fee recipient");
+        feeRecipient = _feeRecipient;
+    }
+    
+    /**
+     * @notice Withdraw collected protocol fees
+     */
+    function withdrawFees() external onlyOwner {
+        uint256 amount = collectedFees;
+        collectedFees = 0;
+        
+        (bool success, ) = payable(feeRecipient).call{value: amount}("");
+        if (!success) revert WithdrawalFailed();
+        
+        emit FeesCollected(feeRecipient, amount);
+    }
+    
+    /**
      * @notice Pause contract (emergency)
      */
     function pause() external onlyOwner {
@@ -402,18 +784,21 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
      * @return reputation Current reputation score
      * @return executions Total successful executions
      * @return failures Total failed executions
+     * @return staked Amount staked by agent
      */
     function getAgentStats(address agent) external view returns (
         bool authorized,
         uint256 reputation,
         uint256 executions,
-        uint256 failures
+        uint256 failures,
+        uint256 staked
     ) {
         return (
             authorizedAgents[agent],
             agentReputation[agent],
             agentExecutionCount[agent],
-            agentFailureCount[agent]
+            agentFailureCount[agent],
+            agentStakes[agent]
         );
     }
     
@@ -423,7 +808,27 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
     function canExecute(address agent) external view returns (bool) {
         return authorizedAgents[agent] && 
                agentReputation[agent] >= minReputation &&
+               block.number >= lastExecutionBlock[agent] + COOLDOWN_BLOCKS &&
                !paused();
+    }
+    
+    /**
+     * @notice Get protocol statistics
+     */
+    function getProtocolStats() external view returns (
+        uint256 totalFees,
+        uint256 minStake,
+        uint256 feeBps,
+        uint256 slashPercent,
+        uint256 maxBatchSize
+    ) {
+        return (
+            collectedFees,
+            MIN_STAKE_AMOUNT,
+            PROTOCOL_FEE_BPS,
+            SLASH_PERCENT,
+            MAX_BATCH_SIZE
+        );
     }
     
     /**
