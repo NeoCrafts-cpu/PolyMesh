@@ -4,8 +4,12 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IPolygonZkEVMBridgeV2.sol";
 import "./interfaces/IBridgeExtension.sol";
+import "./interfaces/IZKMLVerifier.sol";
+import "./interfaces/ITokenWrapper.sol";
 
 /**
  * @title AgentExecutor
@@ -87,6 +91,12 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
     /// @notice Registered AI model hashes for ZKML
     mapping(bytes32 => bool) public registeredModels;
     
+    /// @notice Reference to TokenWrapper for ERC-20 operations
+    address public tokenWrapper;
+    
+    /// @notice Reference to ZKMLVerifier contract
+    IZKMLVerifier public zkmlVerifierContract;
+    
     /// @notice Agent KYA credentials (agent => credentialHash)
     mapping(address => bytes32) public agentCredentials;
     
@@ -119,6 +129,15 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
     event ModelRegistered(bytes32 indexed modelHash);
     event CredentialUpdated(address indexed agent, bytes32 credentialHash);
     event ZKMLProofVerified(address indexed agent, bytes32 indexed proofHash);
+    event TokenWrapperUpdated(address indexed oldWrapper, address indexed newWrapper);
+    event ERC20TradeExecuted(
+        address indexed agent,
+        address indexed tokenIn,
+        address indexed tokenOut,
+        uint256 amountIn,
+        uint256 amountOut,
+        uint256 timestamp
+    );
     
     // ==================== Errors ====================
     
@@ -580,6 +599,17 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
             revert ExecutionFailed("ZKML proof required");
         }
         
+        // If we have an external ZKMLVerifier contract, use it
+        if (address(zkmlVerifierContract) != address(0)) {
+            (bool verified, bytes32 proofHash) = zkmlVerifierContract.verifyProof(agent, zkProof);
+            if (!verified) {
+                revert InvalidZKMLProof(agent);
+            }
+            emit ZKMLProofVerified(agent, proofHash);
+            return;
+        }
+        
+        // Fallback to internal verification
         // Decode proof components
         (bytes32 modelHash, bytes32 inputHash, bytes memory signature) = abi.decode(
             zkProof,
@@ -681,7 +711,17 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
     function setZKMLVerifier(address _zkmlVerifier) external onlyOwner {
         address oldVerifier = zkmlVerifier;
         zkmlVerifier = _zkmlVerifier;
+        zkmlVerifierContract = IZKMLVerifier(_zkmlVerifier);
         emit ZKMLVerifierUpdated(oldVerifier, _zkmlVerifier);
+    }
+    
+    /**
+     * @notice Update the TokenWrapper address
+     */
+    function setTokenWrapper(address _tokenWrapper) external onlyOwner {
+        address oldWrapper = tokenWrapper;
+        tokenWrapper = _tokenWrapper;
+        emit TokenWrapperUpdated(oldWrapper, _tokenWrapper);
     }
     
     /**
@@ -836,6 +876,110 @@ contract AgentExecutor is Ownable, ReentrancyGuard, Pausable {
      */
     function getBridge() external view returns (address) {
         return address(bridge);
+    }
+    
+    // ==================== ERC-20 Token Functions ====================
+    
+    /**
+     * @notice Execute ERC-20 arbitrage trade via TokenWrapper
+     * @param tokenIn Input token address
+     * @param tokenOut Output token address  
+     * @param amountIn Amount of input tokens
+     * @param minAmountOut Minimum output (slippage protection)
+     * @param zkProof Optional ZKML proof
+     */
+    function agentExecuteERC20(
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 minAmountOut,
+        bytes calldata zkProof
+    ) external nonReentrant whenNotPaused rateLimited {
+        // 1. Authorization check
+        if (!authorizedAgents[msg.sender]) {
+            revert UnauthorizedAgent(msg.sender);
+        }
+        
+        // 2. Reputation check
+        if (agentReputation[msg.sender] < minReputation) {
+            revert InsufficientReputation(
+                msg.sender,
+                agentReputation[msg.sender],
+                minReputation
+            );
+        }
+        
+        // 3. ZKML verification (if enabled)
+        if (zkmlEnabled && zkProof.length > 0) {
+            _verifyZKProof(msg.sender, zkProof, abi.encode(tokenIn, tokenOut, amountIn));
+        }
+        
+        // 4. Execute swap via TokenWrapper
+        require(tokenWrapper != address(0), "TokenWrapper not set");
+        
+        uint256 amountOut = ITokenWrapper(tokenWrapper).executeArbitrageSwap(
+            tokenIn,
+            tokenOut,
+            msg.sender,
+            amountIn,
+            minAmountOut
+        );
+        
+        // 5. Update stats
+        agentExecutionCount[msg.sender]++;
+        _updateReputation(msg.sender, true);
+        
+        emit ERC20TradeExecuted(
+            msg.sender,
+            tokenIn,
+            tokenOut,
+            amountIn,
+            amountOut,
+            block.timestamp
+        );
+    }
+    
+    /**
+     * @notice Execute cross-chain ERC-20 transfer
+     * @param token Token to transfer
+     * @param destinationNetwork Target chain ID
+     * @param recipient Recipient on destination
+     * @param amount Amount to transfer
+     */
+    function agentCrossChainERC20(
+        address token,
+        uint32 destinationNetwork,
+        address recipient,
+        uint256 amount
+    ) external nonReentrant whenNotPaused rateLimited {
+        // 1. Authorization check
+        if (!authorizedAgents[msg.sender]) {
+            revert UnauthorizedAgent(msg.sender);
+        }
+        
+        // 2. Execute cross-chain transfer via TokenWrapper
+        require(tokenWrapper != address(0), "TokenWrapper not set");
+        
+        bool success = ITokenWrapper(tokenWrapper).crossChainTransfer(
+            token,
+            msg.sender,
+            destinationNetwork,
+            recipient,
+            amount
+        );
+        
+        require(success, "Cross-chain transfer failed");
+        
+        agentExecutionCount[msg.sender]++;
+        _updateReputation(msg.sender, true);
+    }
+    
+    /**
+     * @notice Get agent's wrapped token balance
+     */
+    function getAgentTokenBalance(address agent, address token) external view returns (uint256) {
+        if (tokenWrapper == address(0)) return 0;
+        return ITokenWrapper(tokenWrapper).getWrappedBalance(token, agent);
     }
     
     // ==================== Receive Function ====================

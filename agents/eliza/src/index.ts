@@ -150,12 +150,42 @@ interface TradeStats {
 const AGENT_EXECUTOR_ABI = [
   'function agentExecuteSimple(uint32 destinationNetwork, address targetContract, uint256 amount, bytes calldata callData) external payable',
   'function agentExecuteSecure(uint32 destinationNetwork, address targetContract, uint256 amount, uint256 minOutputAmount, bytes calldata callData, bytes calldata zkProof) external payable',
+  'function agentExecuteERC20(address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut, bytes calldata zkProof) external',
+  'function agentCrossChainERC20(address token, uint32 destinationNetwork, address recipient, uint256 amount) external',
   'function getAgentStats(address agent) external view returns (bool authorized, uint256 reputation, uint256 executions, uint256 failures, uint256 staked)',
+  'function getAgentTokenBalance(address agent, address token) external view returns (uint256)',
   'function canExecute(address agent) external view returns (bool)',
   'function stake() external payable',
   'function unstake(uint256 amount) external',
   'function getProtocolStats() external view returns (uint256 totalFees, uint256 minStake, uint256 feeBps, uint256 slashPercent, uint256 maxBatchSize)',
+  'function tokenWrapper() external view returns (address)',
 ];
+
+// TokenWrapper ABI for ERC-20 operations
+const TOKEN_WRAPPER_ABI = [
+  'function deposit(address token, uint256 amount) external returns (uint256 wrapped)',
+  'function withdraw(address token, uint256 wrappedAmount) external returns (uint256 received)',
+  'function getWrappedBalance(address token, address user) external view returns (uint256)',
+  'function getSupportedTokens() external view returns (address[])',
+];
+
+// ERC-20 ABI for token approvals
+const ERC20_ABI = [
+  'function approve(address spender, uint256 amount) external returns (bool)',
+  'function allowance(address owner, address spender) external view returns (uint256)',
+  'function balanceOf(address account) external view returns (uint256)',
+  'function symbol() external view returns (string)',
+  'function decimals() external view returns (uint8)',
+];
+
+// Token addresses (testnet - Polygon Amoy)
+const TOKEN_ADDRESSES: { [symbol: string]: string } = {
+  USDC: process.env.USDC_ADDRESS || '0x0000000000000000000000000000000000000000',
+  USDT: process.env.USDT_ADDRESS || '0x0000000000000000000000000000000000000000',
+  WBTC: process.env.WBTC_ADDRESS || '0x0000000000000000000000000000000000000000',
+  WETH: process.env.WETH_ADDRESS || '0x0000000000000000000000000000000000000000',
+  MATIC: process.env.WMATIC_ADDRESS || '0x0000000000000000000000000000000000000000',
+};
 
 // ==================== Notification Service ====================
 
@@ -282,11 +312,14 @@ class PolyMeshAgent {
   private provider: ethers.JsonRpcProvider;
   private wallet: ethers.Wallet;
   private agentExecutor: ethers.Contract;
+  private tokenWrapper: ethers.Contract | null = null;
+  private tokenWrapperAddress: string = '';
   private isRunning: boolean = false;
   private wss: WebSocketServer | null = null;
   private notifications: NotificationService;
   private riskManager: RiskManager;
   private wsClients: Set<WebSocket> = new Set();
+  private tokenContracts: Map<string, ethers.Contract> = new Map();
   private stats: TradeStats = {
     totalTrades: 0,
     successfulTrades: 0,
@@ -439,6 +472,9 @@ class PolyMeshAgent {
     // Check balance
     const balance = await this.provider.getBalance(this.wallet.address);
     console.log(`💰 Agent Balance: ${ethers.formatEther(balance)} ETH\n`);
+
+    // Initialize TokenWrapper if available
+    await this.initializeTokenWrapper();
 
     this.isRunning = true;
 
@@ -946,6 +982,205 @@ class PolyMeshAgent {
     
     // Broadcast updated stats
     this.broadcast('stats', this.stats);
+  }
+
+  // ==================== ERC-20 Token Support ====================
+
+  /**
+   * Initialize TokenWrapper for ERC-20 operations
+   */
+  private async initializeTokenWrapper(): Promise<void> {
+    try {
+      // Get TokenWrapper address from AgentExecutor
+      this.tokenWrapperAddress = await this.agentExecutor.tokenWrapper();
+      
+      if (this.tokenWrapperAddress && this.tokenWrapperAddress !== ethers.ZeroAddress) {
+        this.tokenWrapper = new ethers.Contract(
+          this.tokenWrapperAddress,
+          TOKEN_WRAPPER_ABI,
+          this.wallet
+        );
+        
+        console.log('🪙 TokenWrapper initialized:', this.tokenWrapperAddress);
+        
+        // Initialize token contracts for supported tokens
+        await this.initializeTokenContracts();
+        
+        // Log wrapped balances
+        await this.logWrappedBalances();
+      } else {
+        console.log('ℹ️ TokenWrapper not configured in AgentExecutor');
+      }
+    } catch (e: any) {
+      console.log('ℹ️ TokenWrapper not available:', e.message);
+    }
+  }
+
+  /**
+   * Initialize ERC-20 token contracts
+   */
+  private async initializeTokenContracts(): Promise<void> {
+    for (const [symbol, address] of Object.entries(TOKEN_ADDRESSES)) {
+      if (address !== ethers.ZeroAddress) {
+        const contract = new ethers.Contract(address, ERC20_ABI, this.wallet);
+        this.tokenContracts.set(symbol, contract);
+      }
+    }
+    console.log(`   Initialized ${this.tokenContracts.size} token contracts`);
+  }
+
+  /**
+   * Log current wrapped token balances
+   */
+  private async logWrappedBalances(): Promise<void> {
+    if (!this.tokenWrapper) return;
+
+    console.log('\n📊 Wrapped Token Balances:');
+    for (const [symbol, address] of Object.entries(TOKEN_ADDRESSES)) {
+      if (address !== ethers.ZeroAddress) {
+        try {
+          const balance = await this.tokenWrapper.getWrappedBalance(address, this.wallet.address);
+          if (balance > 0) {
+            console.log(`   ${symbol}: ${ethers.formatUnits(balance, 18)}`);
+          }
+        } catch {
+          // Token might not be supported
+        }
+      }
+    }
+  }
+
+  /**
+   * Execute ERC-20 arbitrage trade
+   */
+  private async executeERC20Trade(opportunity: ArbitrageOpportunity): Promise<void> {
+    if (!this.tokenWrapper) {
+      console.log('⚠️ TokenWrapper not available, falling back to native execution');
+      await this.executeTrade(opportunity);
+      return;
+    }
+
+    console.log(`⚡ Executing ERC-20 ${opportunity.type} trade...`);
+
+    const startTime = Date.now();
+    let success = false;
+    let txHash = '';
+    let gasUsed = BigInt(0);
+    let actualProfit = 0;
+
+    // Broadcast opportunity detection
+    this.broadcast('opportunity', opportunity);
+
+    try {
+      const tokenInAddress = TOKEN_ADDRESSES[opportunity.token];
+      const tokenOutAddress = TOKEN_ADDRESSES['USDC']; // Default to USDC as output
+
+      if (!tokenInAddress || tokenInAddress === ethers.ZeroAddress) {
+        throw new Error(`Token ${opportunity.token} not configured`);
+      }
+
+      // Calculate amounts
+      const amountIn = ethers.parseUnits('10', 18); // 10 tokens
+      const minAmountOut = amountIn * BigInt(95) / BigInt(100); // 5% slippage
+      const zkProof = '0x'; // Would be actual ZKML proof
+
+      console.log(`   Token In: ${opportunity.token} (${tokenInAddress})`);
+      console.log(`   Amount: ${ethers.formatUnits(amountIn, 18)}`);
+
+      // Execute via AgentExecutor
+      console.log('   Calling AgentExecutor.agentExecuteERC20()...');
+
+      const tx = await this.withRetry(
+        () => this.agentExecutor.agentExecuteERC20(
+          tokenInAddress,
+          tokenOutAddress,
+          amountIn,
+          minAmountOut,
+          zkProof,
+          { gasLimit: 500000 }
+        ),
+        'Execute ERC-20 trade'
+      );
+
+      txHash = tx.hash;
+      console.log(`   📝 Transaction sent: ${tx.hash}`);
+      console.log('   ⏳ Waiting for confirmation...');
+
+      // Broadcast pending trade
+      this.broadcast('trade_pending', { ...opportunity, txHash });
+
+      const receipt = await tx.wait();
+      gasUsed = receipt.gasUsed;
+
+      if (receipt.status === 1) {
+        success = true;
+
+        // Calculate actual profit
+        const gasCostETH = parseFloat(ethers.formatEther(gasUsed * (receipt.gasPrice || BigInt(0))));
+        const gasCostUSD = gasCostETH * 2000; // Assume ETH ~ $2000
+        actualProfit = (opportunity.profitPercent / 100 * 10) - gasCostUSD; // 10 token trade
+
+        console.log('   ✅ ERC-20 trade executed successfully!');
+        console.log(`   ⛽ Gas used: ${gasUsed.toString()}`);
+        console.log(`   💵 Actual profit: $${actualProfit.toFixed(2)}\n`);
+
+        this.updateStats(opportunity, true, txHash, gasUsed, actualProfit);
+        await this.notifications.notifyTrade({ ...opportunity, profit: actualProfit, txHash }, true);
+        this.broadcast('trade_success', {
+          ...opportunity,
+          txHash,
+          gasUsed: gasUsed.toString(),
+          actualProfit,
+          timestamp: Date.now(),
+        });
+      } else {
+        console.log('   ❌ ERC-20 trade failed\n');
+        this.updateStats(opportunity, false, txHash, gasUsed, 0);
+        await this.notifications.notifyTrade(opportunity, false);
+        this.broadcast('trade_failed', { ...opportunity, txHash });
+      }
+    } catch (error: any) {
+      console.error('   ❌ ERC-20 execution failed:', error.message, '\n');
+      this.updateStats(opportunity, false, txHash, gasUsed, 0);
+      await this.notifications.notifyTrade({ ...opportunity, error: error.message }, false);
+      this.broadcast('trade_failed', { ...opportunity, error: error.message });
+    }
+  }
+
+  /**
+   * Get ERC-20 token balance
+   */
+  private async getTokenBalance(symbol: string): Promise<bigint> {
+    const contract = this.tokenContracts.get(symbol);
+    if (!contract) return BigInt(0);
+    
+    try {
+      return await contract.balanceOf(this.wallet.address);
+    } catch {
+      return BigInt(0);
+    }
+  }
+
+  /**
+   * Approve token spending for TokenWrapper
+   */
+  private async approveToken(symbol: string, amount: bigint): Promise<boolean> {
+    const contract = this.tokenContracts.get(symbol);
+    if (!contract || !this.tokenWrapperAddress) return false;
+
+    try {
+      const allowance = await contract.allowance(this.wallet.address, this.tokenWrapperAddress);
+      if (allowance >= amount) return true;
+
+      console.log(`   Approving ${symbol} for TokenWrapper...`);
+      const tx = await contract.approve(this.tokenWrapperAddress, ethers.MaxUint256);
+      await tx.wait();
+      console.log(`   ✅ ${symbol} approved`);
+      return true;
+    } catch (error: any) {
+      console.error(`   ❌ Failed to approve ${symbol}:`, error.message);
+      return false;
+    }
   }
 
   private sleep(ms: number): Promise<void> {

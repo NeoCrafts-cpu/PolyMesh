@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Brain, Zap, Network, TrendingUp, Activity, Target, Moon, Sun, Play, Pause, Settings, RefreshCcw, DollarSign } from 'lucide-react';
+import { useAccount, useBalance } from 'wagmi';
 import AgentFlow from './components/AgentFlow';
 import StatsPanel from './components/StatsPanel';
 import TransactionList from './components/TransactionList';
+import WalletButton from './components/WalletButton';
 
 /**
  * PolyMesh Dashboard v0.2.0
@@ -46,6 +48,9 @@ function App() {
   const [isPaused, setIsPaused] = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [showSettings, setShowSettings] = useState(false);
+  // Wallet connection state from wagmi
+  const { address, isConnected: isWalletConnected, chain } = useAccount();
+  const { data: balance } = useBalance({ address });
   const [stats, setStats] = useState<TradeStats>({
     totalTrades: 0,
     successfulTrades: 0,
@@ -57,6 +62,12 @@ function App() {
     dailyProfitLoss: 0,
     tradeHistory: [],
   });
+  const [lastOpportunity, setLastOpportunity] = useState<{
+    token: string;
+    profitPercent: number;
+    buyChain: string;
+    sellChain: string;
+  } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const maxReconnectAttempts = 10;
@@ -85,6 +96,7 @@ function App() {
         
         case 'opportunity':
           setAgentStatus('thinking');
+          setLastOpportunity(message.data);
           console.log('Opportunity detected:', message.data);
           break;
         
@@ -95,11 +107,13 @@ function App() {
         
         case 'trade_success':
           setAgentStatus('idle');
+          setLastOpportunity(null);
           console.log('Trade success:', message.data);
           break;
         
         case 'trade_failed':
           setAgentStatus('idle');
+          setLastOpportunity(null);
           console.log('Trade failed:', message.data);
           break;
       }
@@ -233,9 +247,12 @@ function App() {
               <div className={`px-4 py-2 rounded-lg ${isDarkTheme ? 'bg-purple-500/10 border border-purple-500/20' : 'bg-purple-100 border border-purple-300'}`}>
                 <div className="flex items-center gap-2">
                   <Network className="w-4 h-4 text-purple-400" />
-                  <span className="text-sm">Polygon Amoy</span>
+                  <span className="text-sm">{chain?.name || 'Polygon Amoy'}</span>
                 </div>
               </div>
+              
+              {/* Wallet Button */}
+              <WalletButton />
             </div>
           </div>
         </div>
@@ -317,19 +334,23 @@ function App() {
                 <TrendingUp className="w-5 h-5 text-purple-400" />
                 Live Agent Execution Flow
               </h3>
-              <AgentFlow agentStatus={agentStatus} setAgentStatus={setAgentStatus} />
+              <AgentFlow 
+                agentStatus={agentStatus} 
+                isConnected={isConnected}
+                lastOpportunity={lastOpportunity}
+              />
             </div>
           </div>
 
           <div className="lg:col-span-1">
-            <StatsPanel />
+            <StatsPanel stats={stats} isConnected={isConnected} />
           </div>
         </div>
 
         {/* Transaction Feed */}
         <div className="bg-black/40 backdrop-blur-xl rounded-xl border border-purple-500/20 p-6 glow-border">
           <h3 className="text-xl font-bold mb-4">Recent Transactions</h3>
-          <TransactionList />
+          <TransactionList trades={stats.tradeHistory} isConnected={isConnected} />
         </div>
       </main>
 
